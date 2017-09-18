@@ -22,7 +22,7 @@ data.
 CuArray
 
 type CuArray{T,N} <: AbstractArray{T,N}
-    ptr::OwnedPtr{T}
+    buf::Mem.Buffer
     shape::NTuple{N,Int}
 
     # inner constructors (exact types, ie. Int not <:Integer)
@@ -30,19 +30,19 @@ type CuArray{T,N} <: AbstractArray{T,N}
         check_type(T)
 
         len = prod(shape)
-        ptr = Mem.alloc(T, len)
-        Mem.retain(ptr)
+        buf = Mem.alloc(T, len)
+        retain(buf)
 
-        obj = new{T,N}(ptr, shape)
+        obj = new{T,N}(buf, shape)
         finalizer(obj, unsafe_free!)
         return obj
     end
-    function (::Type{CuArray{T,N}}){T,N}(shape::NTuple{N,Int}, ptr::OwnedPtr{T})
+    function (::Type{CuArray{T,N}}){T,N}(shape::NTuple{N,Int}, buf::Buffer)
         check_type(T)
 
-        Mem.retain(ptr)
+        retain(buf)
 
-        obj = new{T, N}(ptr, shape)
+        obj = new{T, N}(buf, shape)
         finalizer(obj, unsafe_free!)
         return obj
     end
@@ -61,14 +61,13 @@ end
 @compat const CuMatrix{T} = CuArray{T,2}
 
 function unsafe_free!(a::CuArray)
-    ptr = pointer(a)
-    if !Mem.release(ptr)
+    if !release(a.buf)
         @trace("Skipping finalizer for CuArray object at $(Base.pointer_from_objref(a))) because pointer is held by another object")
-    elseif !isvalid(ptr.ctx)
+    elseif !isvalid(a.buf.ctx)
         @trace("Skipping finalizer for CuArray object at $(Base.pointer_from_objref(a))) because context is no longer valid")
     else
         @trace("Finalizing CuArray object at $(Base.pointer_from_objref(a))")
-        Mem.free(ptr)
+        Mem.free(a.buf)
     end
 end
 
@@ -92,23 +91,20 @@ Base.similar{T,N}(a::CuArray{T}, dims::Dims{N})     = CuArray{T,N}(dims)
 
 ## getters
 
-Base.pointer(a::CuArray) = a.ptr
-
-Base.size(g::CuArray) = g.shape
-Base.length(g::CuArray) = prod(g.shape)
+Base.size(a::CuArray) = a.shape
+Base.length(a::CuArray) = prod(a.shape)
 Base.sizeof{T}(a::CuArray{T}) = Base.elsize(a) * length(a)
 
 
 ## conversions
 
-Base.unsafe_convert{T}(::Type{Ptr{T}}, a::CuArray{T}) =
-    Base.unsafe_convert(Ptr{T}, pointer(a))
+Base.cconvert{T}(::Type{Ptr{T}}, a::CuArray{T}) = a.buf
 
 
 ## comparisons
 
-Base.:(==)(a::CuArray, b::CuArray) = pointer(a) == pointer(b)
-Base.hash(a::CuArray, h::UInt) = hash(pointer(a), h)
+Base.:(==)(a::CuArray, b::CuArray) = a.buf == b.buf
+Base.hash(a::CuArray, h::UInt) = hash(a.buf, h)
 
 # override the Base isequal, which compares values
 Base.isequal(a::CuArray, b::CuArray) = a == b
@@ -132,7 +128,7 @@ function Base.copy!{T}(dst::CuArray{T}, src::Array{T})
     if length(dst) != length(src)
         throw(ArgumentError("Inconsistent array length."))
     end
-    Mem.upload(pointer(dst), pointer(src), length(src) * sizeof(T))
+    Mem.upload(dst.buf, pointer(src), length(src) * sizeof(T))
     return dst
 end
 
@@ -146,7 +142,7 @@ function Base.copy!{T}(dst::Array{T}, src::CuArray{T})
     if length(dst) != length(src)
         throw(ArgumentError("Inconsistent array length."))
     end
-    Mem.download(pointer(dst), pointer(src), length(src) * sizeof(T))
+    Mem.download(pointer(dst), src.buf, length(src) * sizeof(T))
     return dst
 end
 
@@ -160,7 +156,7 @@ function Base.copy!{T}(dst::CuArray{T}, src::CuArray{T})
     if length(dst) != length(src)
         throw(ArgumentError("Inconsistent array length."))
     end
-    Mem.transfer(pointer(dst), pointer(src), length(src) * sizeof(T))
+    Mem.transfer(dst.buf, src.buf, length(src) * sizeof(T))
     return dst
 end
 
@@ -175,7 +171,7 @@ Transfer a host array `src` to device, returning a [`CuArray`](@ref).
 CuArray{T,N}(src::Array{T,N}) = copy!(CuArray{T,N}(size(src)), src)
 
 """
-    Array{T}(g::CuArray{T})
+    Array{T}(src::CuArray{T})
 
 Transfer a device array `src` to host, returning an `Array`.
 """
